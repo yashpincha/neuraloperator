@@ -1,5 +1,5 @@
 from functools import partialmethod
-from typing import Tuple, List, Union, Literal
+from typing import Tuple, List, Optional, Union, Literal
 
 Number = Union[float, int]
 
@@ -183,7 +183,9 @@ class FNO(BaseModel, name="FNO"):
         use_channel_mlp: bool = True,
         channel_mlp_dropout: float = 0,
         channel_mlp_expansion: float = 0.5,
-        channel_mlp_skip: Literal["linear", "identity", "soft-gating", None] = "soft-gating",
+        channel_mlp_skip: Literal[
+            "linear", "identity", "soft-gating", None
+        ] = "soft-gating",
         fno_skip: Literal["linear", "identity", "soft-gating", None] = "linear",
         resolution_scaling_factor: Union[Number, List[Number]] = None,
         domain_padding: Union[Number, List[Number]] = None,
@@ -199,11 +201,19 @@ class FNO(BaseModel, name="FNO"):
         preactivation: bool = False,
         conv_module: nn.Module = SpectralConv,
         enforce_hermitian_symmetry: bool = True,
+        embed: Optional[dict] = None,
+        mode_modulation: Optional[dict] = None,
+        norm_modulation: Optional[dict] = None,
     ):
         if decomposition_kwargs is None:
             decomposition_kwargs = {}
         super().__init__()
         self.n_dim = len(n_modes)
+        # Time conditioning is active iff any of the modulation dicts is
+        # configured. forward(t=...) is silently ignored otherwise.
+        self._time_conditioned = (
+            mode_modulation is not None and mode_modulation.get("enabled", True)
+        ) or (norm_modulation is not None and norm_modulation.get("enabled", True))
 
         # n_modes is a special property - see the class' property for underlying mechanism
         # When updated, change should be reflected in fno blocks
@@ -277,7 +287,8 @@ class FNO(BaseModel, name="FNO"):
                 resolution_scaling_factor = [resolution_scaling_factor] * self.n_layers
         self.resolution_scaling_factor = resolution_scaling_factor
 
-        ## FNO blocks
+        ## FNO blocks. Modulation kwargs default to None; passing them is a
+        ## no-op when no modulation is configured.
         self.fno_blocks = FNOBlocks(
             in_channels=hidden_channels,
             out_channels=hidden_channels,
@@ -304,6 +315,9 @@ class FNO(BaseModel, name="FNO"):
             conv_module=conv_module,
             n_layers=n_layers,
             enforce_hermitian_symmetry=enforce_hermitian_symmetry,
+            embed=embed,
+            mode_modulation=mode_modulation,
+            norm_modulation=norm_modulation,
         )
 
         ## Lifting layer
@@ -334,7 +348,7 @@ class FNO(BaseModel, name="FNO"):
         if self.complex_data:
             self.projection = ComplexValued(self.projection)
 
-    def forward(self, x, output_shape=None, **kwargs):
+    def forward(self, x, output_shape=None, t=None, **kwargs):
         """FNO's forward pass
 
         1. Applies optional positional encoding
@@ -362,6 +376,12 @@ class FNO(BaseModel, name="FNO"):
             * If tuple, specifies the output-shape of the **last** FNO Block
 
             * If tuple list, specifies the exact output-shape of each FNO Block
+
+        t : float, int, or torch.Tensor, optional
+            Scalar time used when at least one of ``mode_modulation`` or
+            ``norm_modulation`` was configured at construction. Accepted as
+            a Python scalar, a 0-d tensor, a 1-d ``(B,)`` tensor, or a
+            ``(B, 1)`` tensor. Ignored when no modulation is configured.
         """
         if kwargs:
             warnings.warn(
@@ -376,6 +396,16 @@ class FNO(BaseModel, name="FNO"):
         elif isinstance(output_shape, tuple):
             output_shape = [None] * (self.n_layers - 1) + [output_shape]
 
+        if self._time_conditioned:
+            if t is None:
+                t = 1
+            if not isinstance(t, torch.Tensor):
+                t = torch.tensor(t, dtype=x.dtype, device=x.device)
+            if t.ndim == 0:
+                t = t.expand(x.shape[0], 1)
+            elif t.ndim == 1:
+                t = t.unsqueeze(-1)
+
         # append spatial pos embedding if set
         if self.positional_embedding is not None:
             x = self.positional_embedding(x)
@@ -386,7 +416,7 @@ class FNO(BaseModel, name="FNO"):
             x = self.domain_padding.pad(x)
 
         for layer_idx in range(self.n_layers):
-            x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx])
+            x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx], t=t)
 
         if self.domain_padding is not None:
             x = self.domain_padding.unpad(x)
@@ -403,6 +433,17 @@ class FNO(BaseModel, name="FNO"):
     def n_modes(self, n_modes):
         self.fno_blocks.n_modes = n_modes
         self._n_modes = n_modes
+
+    def clear_all_caches(self):
+        """Clear frequency-grid caches in all submodules.
+
+        Spectral conv layers cache their frequency-mode grids for efficiency.
+        Call this method after changing the input resolution or moving the
+        model to a different device to ensure the cached grids are rebuilt.
+        """
+        for module in self.modules():
+            if hasattr(module, "clear_cache"):
+                module.clear_cache()
 
 
 def partialclass(new_name, cls, *args, **kwargs):
@@ -465,6 +506,61 @@ class TFNO(FNO):
     >>> # Equivalent FNO model with explicit factorization:
     >>> model = FNO(n_modes=(12, 12), in_channels=1, out_channels=1, hidden_channels=64,
     ...             factorization="Tucker", rank=0.1)
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("factorization", "Tucker")
+        kwargs.setdefault("rank", 0.1)
+        super().__init__(*args, **kwargs)
+
+
+_T_EMB_DEFAULT_EMBED = {
+    "type_t": "sinusoidal",
+    "type_k": "power",
+    "dim": 32,
+    "alpha": -2.0,
+    "r": 10000.0,
+}
+
+_T_EMB_DEFAULT_MODE_MOD = {
+    "enabled": True,
+    "type": "polar",
+    "hidden_channels": 64,
+    "full_res": False,
+}
+
+
+class t_emb_FNO(FNO):
+    """Time-conditioned Fourier Neural Operator.
+
+    An :class:`FNO` pre-configured with default ``embed`` and
+    ``mode_modulation`` dicts so that ``forward(x, t=...)`` does mode
+    modulation out of the box. Any of ``embed``, ``mode_modulation``, or
+    ``norm_modulation`` passed by the caller override the defaults.
+
+    See :class:`FNO`, :class:`~neuralop.layers.spectral_convolution.SpectralConv`,
+    and :class:`~neuralop.layers.fno_block.FNOBlocks` for the modulation
+    dict schemas.
+
+    Examples
+    --------
+    >>> from neuralop.models import t_emb_FNO
+    >>> model = t_emb_FNO(n_modes=(12, 12), in_channels=1, out_channels=1,
+    ...                   hidden_channels=64)
+    >>> y = model(torch.randn(2, 1, 16, 16), t=0.5)
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("embed", _T_EMB_DEFAULT_EMBED.copy())
+        kwargs.setdefault("mode_modulation", _T_EMB_DEFAULT_MODE_MOD.copy())
+        super().__init__(*args, **kwargs)
+
+
+class t_emb_TFNO(t_emb_FNO):
+    """Time-conditioned Tucker-factorized FNO.
+
+    Combines :class:`t_emb_FNO` with :class:`TFNO`'s defaults
+    (``factorization='Tucker'``, ``rank=0.1``).
     """
 
     def __init__(self, *args, **kwargs):
