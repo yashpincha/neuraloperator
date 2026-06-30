@@ -293,9 +293,8 @@ class FNO(BaseModel, name="FNO"):
             self.domain_padding = None
 
         ## Resolution scaling factor
-        if resolution_scaling_factor is not None:
-            if isinstance(resolution_scaling_factor, (float, int)):
-                resolution_scaling_factor = [resolution_scaling_factor] * self.n_layers
+        if resolution_scaling_factor is not None and isinstance(resolution_scaling_factor, (float, int)):
+            resolution_scaling_factor = [resolution_scaling_factor] * self.n_layers
         self.resolution_scaling_factor = resolution_scaling_factor
 
         ## FNO blocks. Modulation kwargs default to None; passing them is a

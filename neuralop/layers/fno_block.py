@@ -162,7 +162,7 @@ class FNOBlocks(nn.Module):
         conv_module=SpectralConv,
         fixed_rank_modes=False,
         implementation="factorized",
-        decomposition_kwargs=dict(),
+        decomposition_kwargs={},
         enforce_hermitian_symmetry=True,
         embed: Optional[dict] = None,
         mode_modulation: Optional[dict] = None,
@@ -204,11 +204,7 @@ class FNOBlocks(nn.Module):
         self.enforce_hermitian_symmetry = enforce_hermitian_symmetry
 
         # apply real nonlin if data is real, otherwise CGELU
-        if self.complex_data:
-            self.non_linearity = CGELU
-        else:
-            self.non_linearity = non_linearity
-
+        self.non_linearity = CGELU if self.complex_data else non_linearity
         # Track which modulation pathways are active for the forward dispatch.
         self._mode_mod_enabled = mode_modulation is not None and mode_modulation.get(
             "enabled", True
@@ -557,11 +553,7 @@ class FNOBlocks(nn.Module):
             )
 
         if self.stabilizer == "tanh":
-            if self.complex_data:
-                x = ctanh(x)
-            else:
-                x = torch.tanh(x)
-
+            x = ctanh(x) if self.complex_data else torch.tanh(x)
         # The conv accepts `t` only when mode_modulation was configured at
         # construction time; pass it positionally so SpectralConv-family
         # signatures (x, t, output_shape) work uniformly.
@@ -589,11 +581,7 @@ class FNOBlocks(nn.Module):
             x_mlp = self.channel_mlp[index](x)
             if self._mod_flags["gate_2"]:
                 x_mlp = x_mlp * torch.sigmoid(mods["gate2"])
-            if self.channel_mlp_skips is not None:
-                x = x_mlp + x_skip_channel_mlp
-            else:
-                x = x_mlp
-
+            x = x_mlp + x_skip_channel_mlp if self.channel_mlp_skips is not None else x_mlp
         if self.norm is not None:
             x = self.norm[self.n_norms * index + 1](x)
 
@@ -626,11 +614,7 @@ class FNOBlocks(nn.Module):
             )
 
         if self.stabilizer == "tanh":
-            if self.complex_data:
-                x = ctanh(x)
-            else:
-                x = torch.tanh(x)
-
+            x = ctanh(x) if self.complex_data else torch.tanh(x)
         if self._mode_mod_enabled:
             x_fno = self.convs[index](x, t, output_shape=output_shape)
         else:

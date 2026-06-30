@@ -145,8 +145,9 @@ def _contract_tt(x, tt_weight, separable=False):
         out_syms = list(x_syms)
     rank_syms = list(einsum_symbols[order + 1:])
     tt_syms = []
-    for i, s in enumerate(weight_syms):
-        tt_syms.append([rank_syms[i], s, rank_syms[i + 1]])
+    tt_syms.extend(
+        [rank_syms[i], s, rank_syms[i + 1]] for i, s in enumerate(weight_syms)
+    )
     eq = (
         "".join(x_syms)
         + ","
@@ -178,10 +179,7 @@ def get_contract_fun(weight, implementation="reconstructed", separable=False):
     function : (x, weight) -> x * weight in Fourier space
     """
     if implementation == "reconstructed":
-        if separable:
-            return _contract_dense_separable
-        else:
-            return _contract_dense
+        return _contract_dense_separable if separable else _contract_dense
     elif implementation == "factorized":
         if torch.is_tensor(weight):
             return _contract_dense
@@ -394,11 +392,8 @@ class SpectralConv(BaseSpectralConv):
             init_std = (2 / (in_channels + out_channels)) ** 0.5
 
         if isinstance(fixed_rank_modes, bool):
-            if fixed_rank_modes:
-                # If bool, keep the number of layers fixed
-                fixed_rank_modes = [0]
-            else:
-                fixed_rank_modes = None
+            # If bool, keep the number of layers fixed
+            fixed_rank_modes = [0] if fixed_rank_modes else None
         self.fft_norm = fft_norm
 
         if factorization is None:
@@ -434,10 +429,10 @@ class SpectralConv(BaseSpectralConv):
         )
 
         if bias:
-            self.bias = nn.Parameter(
+            self.bias = nn.Parameter((
                 init_std
-                * torch.randn(*(tuple([self.out_channels]) + (1,) * self.order))
-            )
+                * torch.randn(*((self.out_channels,) + (1,) * self.order))
+            ))
         else:
             self.bias = None
 
@@ -645,10 +640,8 @@ class SpectralConv(BaseSpectralConv):
 
         if self.resolution_scaling_factor is not None and output_shape is None:
             out_shape = tuple(
-                [
-                    round(s * r)
-                    for (s, r) in zip(in_shape, self.resolution_scaling_factor)
-                ]
+                round(s * r)
+                for (s, r) in zip(in_shape, self.resolution_scaling_factor)
             )
         elif output_shape is not None:
             out_shape = output_shape
@@ -666,10 +659,8 @@ class SpectralConv(BaseSpectralConv):
 
     @n_modes.setter
     def n_modes(self, n_modes):
-        if isinstance(n_modes, int):  # Should happen for 1D FNO only
-            n_modes = [n_modes]
-        else:
-            n_modes = list(n_modes)
+        # Should happen for 1D FNO only
+        n_modes = [n_modes] if isinstance(n_modes, int) else list(n_modes)
         # the real FFT is skew-symmetric, so the last mode has a redundacy if our data is real in space
         # As a design choice we do the operation here to avoid users dealing with the +1
         # if we use the full FFT we cannot cut off informtion from the last mode
@@ -749,10 +740,7 @@ class SpectralConv(BaseSpectralConv):
         ]
         # if contraction is separable, weights have shape (channels, modes_x, ...)
         # otherwise they have shape (in_channels, out_channels, modes_x, ...)
-        if self.separable:
-            slices_w = [slice(None)]  # channels
-        else:
-            slices_w = [slice(None), slice(None)]  # in_channels, out_channels
+        slices_w = [slice(None)] if self.separable else [slice(None), slice(None)]
         if self.complex_data:
             slices_w += [
                 slice(start // 2, -start // 2) if start else slice(start, None)
@@ -771,13 +759,8 @@ class SpectralConv(BaseSpectralConv):
 
         ### Pick the first n_modes modes of FFT signal along each dim
 
-        # if separable conv, weight tensor only has one channel dim
-        if self.separable:
-            weight_start_idx = 1
-        # otherwise drop first two dims (in_channels, out_channels)
-        else:
-            weight_start_idx = 2
-
+        # if separable conv, weight tensor only has one channel dim; otherwise drop first two dims (in_channels, out_channels)
+        weight_start_idx = 1 if self.separable else 2
         slices_x = [slice(None), slice(None)]  # Batch_size, channels
 
         for all_modes, kept_modes in zip(
@@ -831,10 +814,8 @@ class SpectralConv(BaseSpectralConv):
 
         if self.resolution_scaling_factor is not None and output_shape is None:
             mode_sizes = tuple(
-                [
-                    round(s * r)
-                    for (s, r) in zip(mode_sizes, self.resolution_scaling_factor)
-                ]
+                round(s * r)
+                for (s, r) in zip(mode_sizes, self.resolution_scaling_factor)
             )
 
         if output_shape is not None:
@@ -845,7 +826,7 @@ class SpectralConv(BaseSpectralConv):
 
         # Inverse FFT
         if self.complex_data:
-            # For complex data, we can use ifftn.
+
             x = torch.fft.ifftn(out_fft, s=mode_sizes, dim=fft_dims, norm=self.fft_norm)
 
         else:
