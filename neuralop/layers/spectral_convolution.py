@@ -263,7 +263,7 @@ class SpectralConv(BaseSpectralConv):
     factorization : str or None, optional
         Tensor factorization type. Options: {'tucker', 'cp', 'tt'}.
         If None, a single dense weight is learned for the FNO.
-        Otherwise, that weight, used for the contraction in the Fourier domain
+        Otherwise, that weight, used for the contraction in the Fourier domain,
         is learned in factorized form. In that case, `factorization` is the
         tensor factorization of the parameters weight used.
         By default None.
@@ -315,7 +315,7 @@ class SpectralConv(BaseSpectralConv):
         By default ``None``; no mode modulation is applied and ``forward``
         ignores ``t``.
     mode_modulation : dict or None, optional
-        Configuration for the optional per-mode modulation MLP. When set
+        Configuration for the optional per-mode modulation MLP. When set,
         the layer applies a learned ``(t, k)``-dependent multiplier to the
         spectral coefficients before the convolution contraction. Keys:
 
@@ -661,9 +661,9 @@ class SpectralConv(BaseSpectralConv):
     def n_modes(self, n_modes):
         # Should happen for 1D FNO only
         n_modes = [n_modes] if isinstance(n_modes, int) else list(n_modes)
-        # the real FFT is skew-symmetric, so the last mode has a redundacy if our data is real in space
+        # the real FFT is skew-symmetric, so the last mode has a redundancy if our data is real in space
         # As a design choice we do the operation here to avoid users dealing with the +1
-        # if we use the full FFT we cannot cut off informtion from the last mode
+        # if we use the full FFT we cannot cut off information from the last mode
         if not self.complex_data:
             n_modes[-1] = n_modes[-1] // 2 + 1
         self._n_modes = n_modes
@@ -826,7 +826,7 @@ class SpectralConv(BaseSpectralConv):
 
         # Inverse FFT
         if self.complex_data:
-
+            # For complex data, we can use ifftn.
             x = torch.fft.ifftn(out_fft, s=mode_sizes, dim=fft_dims, norm=self.fft_norm)
 
         else:

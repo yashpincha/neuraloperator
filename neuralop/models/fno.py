@@ -38,13 +38,13 @@ class FNO(BaseModel, name="FNO"):
     n_modes : Tuple[int, ...]
         Number of modes to keep in Fourier Layer, along each dimension.
         The dimensionality of the FNO is inferred from len(n_modes).
-        n_modes must be larger enough but smaller than max_resolution//2 (Nyquist frequency)
+        n_modes must be large enough but smaller than max_resolution//2 (Nyquist frequency)
     in_channels : int
         Number of channels in input function. Determined by the problem.
     out_channels : int
         Number of channels in output function. Determined by the problem.
     hidden_channels : int
-        Width of the FNO (i.e. number of channels).
+        Width of the FNO (i.e., number of channels).
         This significantly affects the number of parameters of the FNO.
         Good starting point can be 64, and then increased if more expressivity is needed.
         Update lifting_channel_ratio and projection_channel_ratio accordingly since they are proportional to hidden_channels.
