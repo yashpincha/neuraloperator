@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import List, Union
 
 import torch
 from torch import nn
@@ -161,12 +161,11 @@ class FNOBlocks(nn.Module):
         factorization=None,
         rank=1.0,
         conv_module=SpectralConv,
+        conv_kwargs=None,
         fixed_rank_modes=False,
         implementation="factorized",
         decomposition_kwargs=dict(),
         enforce_hermitian_symmetry=True,
-        mode_modulation: bool = False,
-        cond_embed_dim: Optional[int] = None,
     ):
         super().__init__()
         if isinstance(n_modes, int):
@@ -208,14 +207,7 @@ class FNOBlocks(nn.Module):
         else:
             self.non_linearity = non_linearity
 
-        if mode_modulation:
-            if cond_embed_dim is None:
-                raise ValueError("cond_embed_dim is required when mode_modulation=True")
-            conv_module = ConditionalSpectralConv
-            cond_kwargs = {"condition_embedding_channels": cond_embed_dim}
-        else:
-            cond_kwargs = {}
-        self._mode_modulation = mode_modulation
+        conv_kwargs = conv_kwargs or {}
 
         # One conv per layer. Only resolution_scaling_factor varies by layer index
         self.convs = nn.ModuleList(
@@ -244,7 +236,7 @@ class FNOBlocks(nn.Module):
                         if issubclass(conv_module, SpectralConv)
                         else {}
                     ),
-                    **cond_kwargs,
+                    **conv_kwargs,
                 )
                 for i in range(n_layers)
             ]
@@ -362,15 +354,6 @@ class FNOBlocks(nn.Module):
         if self.complex_data and self.norm is not None:
             self.norm = nn.ModuleList([ComplexValued(x) for x in self.norm])
 
-        # FiLM projectors: Linear(cond_embed_dim, 2*out_channels) * (n_layers * 2).
-        # Index 2*i is applied after the spectral conv; index 2*i+1 after the channel MLP.
-        if cond_embed_dim is not None:
-            self.film_proj = nn.ModuleList(
-                [nn.Linear(cond_embed_dim, 2 * out_channels) for _ in range(n_layers * 2)]
-            )
-        else:
-            self.film_proj = None
-
     def set_ada_in_embeddings(self, *embeddings):
         """Sets the embeddings of each Ada-IN norm layers
 
@@ -388,21 +371,19 @@ class FNOBlocks(nn.Module):
                 for norm, embedding in zip(self.norm, embeddings):
                     norm.set_embedding(embedding)
 
-    @staticmethod
-    def _film(x, proj_out, n_dim):
-        """Apply FiLM: x * (1 + scale) + shift, broadcasting over spatial dims."""
-        scale, shift = proj_out.chunk(2, dim=-1)
-        scale = scale.view(*scale.shape, *([1] * n_dim))
-        shift = shift.view(*shift.shape, *([1] * n_dim))
-        return x * (1 + scale) + shift
+    def _apply_conv(self, index, x, output_shape):
+        return self.convs[index](x, output_shape=output_shape)
 
-    def forward(self, x, index=0, output_shape=None, cond_emb=None):
+    def _condition(self, x, index, site):
+        return x
+
+    def forward(self, x, index=0, output_shape=None):
         if self.preactivation:
-            return self.forward_with_preactivation(x, index, output_shape, cond_emb=cond_emb)
+            return self.forward_with_preactivation(x, index, output_shape)
         else:
-            return self.forward_with_postactivation(x, index, output_shape, cond_emb=cond_emb)
+            return self.forward_with_postactivation(x, index, output_shape)
 
-    def forward_with_postactivation(self, x, index=0, output_shape=None, cond_emb=None):
+    def forward_with_postactivation(self, x, index=0, output_shape=None):
         if self.fno_skips is not None:
             x_skip_fno = self.fno_skips[index](x)
             x_skip_fno = self.convs[index].transform(x_skip_fno, output_shape=output_shape)
@@ -417,16 +398,12 @@ class FNOBlocks(nn.Module):
             else:
                 x = torch.tanh(x)
 
-        if self._mode_modulation:
-            x_fno = self.convs[index](x, output_shape=output_shape, condition_embedding=cond_emb)
-        else:
-            x_fno = self.convs[index](x, output_shape=output_shape)
+        x_fno = self._apply_conv(index, x, output_shape)
 
         if self.norm is not None:
             x_fno = self.norm[self.n_norms * index](x_fno)
 
-        if self.film_proj is not None and cond_emb is not None:
-            x_fno = self._film(x_fno, self.film_proj[2 * index](cond_emb), self.n_dim)
+        x_fno = self._condition(x_fno, index, 0)
 
         x = x_fno + x_skip_fno if self.fno_skips is not None else x_fno
 
@@ -442,15 +419,14 @@ class FNOBlocks(nn.Module):
         if self.norm is not None:
             x = self.norm[self.n_norms * index + 1](x)
 
-        if self.film_proj is not None and cond_emb is not None:
-            x = self._film(x, self.film_proj[2 * index + 1](cond_emb), self.n_dim)
+        x = self._condition(x, index, 1)
 
         if index < (self.n_layers - 1):
             x = self.non_linearity(x)
 
         return x
 
-    def forward_with_preactivation(self, x, index=0, output_shape=None, cond_emb=None):
+    def forward_with_preactivation(self, x, index=0, output_shape=None):
         # Apply non-linear activation (and norm)
         # before this block's convolution/forward pass:
         x = self.non_linearity(x)
@@ -472,13 +448,9 @@ class FNOBlocks(nn.Module):
             else:
                 x = torch.tanh(x)
 
-        if self._mode_modulation:
-            x_fno = self.convs[index](x, output_shape=output_shape, condition_embedding=cond_emb)
-        else:
-            x_fno = self.convs[index](x, output_shape=output_shape)
+        x_fno = self._apply_conv(index, x, output_shape)
 
-        if self.film_proj is not None and cond_emb is not None:
-            x_fno = self._film(x_fno, self.film_proj[2 * index](cond_emb), self.n_dim)
+        x_fno = self._condition(x_fno, index, 0)
 
         x = x_fno + x_skip_fno if self.fno_skips is not None else x_fno
 
@@ -488,8 +460,7 @@ class FNOBlocks(nn.Module):
         if self.norm is not None:
             x = self.norm[self.n_norms * index + 1](x)
 
-        if self.film_proj is not None and cond_emb is not None:
-            x = self._film(x, self.film_proj[2 * index + 1](cond_emb), self.n_dim)
+        x = self._condition(x, index, 1)
 
         if self.use_channel_mlp:
             if self.channel_mlp_skips is not None:
@@ -523,6 +494,108 @@ class FNOBlocks(nn.Module):
 
     def __getitem__(self, indices):
         return self.get_block(indices)
+
+class ConditionalFNOBlocks(FNOBlocks):
+    """FNOBlocks with parameter conditioning.
+
+    The spectral conv becomes a ConditionalSpectralConv (when mode_modulation is set), 
+    and a per-layer FiLM affine is applied after each norm site (when film is set).
+
+    Either pathway can be used on its own.
+
+    The conditioning embedding is passed per forward call as cond_emb
+    or set once with set_cond_emb; computing it is left to the caller.
+
+    Parameters
+    ----------
+    *args
+        Positional arguments forwarded to FNOBlocks.
+    condition_embedding_channels : int
+        Width of the conditioning embedding passed to forward.
+    mode_modulation : bool, optional
+        Use ConditionalSpectralConv for per-mode spectral modulation. Defaults to True.
+    film : bool, optional
+        Apply FiLM adaptive norm conditioning. By default True.
+    conv_module : nn.Module, optional
+        Convolution class. Defaults to ConditionalSpectralConv when mode_modulation is set; SpectralConv otherwise
+    modulation_type, k_embed_dim, type_k, modulator_hidden_channels
+        Forwarded to ConditionalSpectralConv.
+    **kwargs
+        kwargs forwarded to FNOBlocks.
+    """
+
+    def __init__(
+        self,
+        *args,
+        condition_embedding_channels: int,
+        mode_modulation: bool = True,
+        film: bool = True,
+        conv_module=None,
+        modulation_type: str = "polar",
+        k_embed_dim: int = 32,
+        type_k: str = "power",
+        modulator_hidden_channels: int = 64,
+        conv_kwargs=None,
+        **kwargs,
+    ):
+        conv_kwargs = dict(conv_kwargs or {})
+        if mode_modulation:
+            if conv_module is None:
+                conv_module = ConditionalSpectralConv
+            conv_kwargs.update(
+                condition_embedding_channels=condition_embedding_channels,
+                modulation_type=modulation_type,
+                k_embed_dim=k_embed_dim,
+                type_k=type_k,
+                hidden_channels=modulator_hidden_channels,
+            )
+        elif conv_module is None:
+            conv_module = SpectralConv
+
+        super().__init__(*args, conv_module=conv_module, conv_kwargs=conv_kwargs, **kwargs)
+
+        self.condition_embedding_channels = condition_embedding_channels
+        self._mode_modulation = mode_modulation
+        self._cond_emb = None
+
+        if film:
+            self.film_proj = nn.ModuleList(
+                [
+                    nn.Linear(condition_embedding_channels, 2 * self.out_channels)
+                    for _ in range(self.n_layers * 2)
+                ]
+            )
+        else:
+            self.film_proj = None
+
+    def set_cond_emb(self, cond_emb):
+        self._cond_emb = cond_emb
+
+    def forward(self, x, index=0, output_shape=None, cond_emb=None):
+        if cond_emb is not None:
+            self._cond_emb = cond_emb
+        return super().forward(x, index=index, output_shape=output_shape)
+
+    def _apply_conv(self, index, x, output_shape):
+        if self._mode_modulation:
+            return self.convs[index](
+                x, output_shape=output_shape, condition_embedding=self._cond_emb
+            )
+        return self.convs[index](x, output_shape=output_shape)
+
+    def _condition(self, x, index, site):
+        if self.film_proj is None or self._cond_emb is None:
+            return x
+        proj_out = self.film_proj[2 * index + site](self._cond_emb)
+        return self._film(x, proj_out, self.n_dim)
+
+    @staticmethod
+    def _film(x, proj_out, n_dim):
+        """Apply FiLM's x * (1 + scale) + shift, broadcasting over spatial dims."""
+        scale, shift = proj_out.chunk(2, dim=-1)
+        scale=scale.view(*scale.shape, *([1] * n_dim))
+        shift=shift.view(*shift.shape, *([1] * n_dim))
+        return x*(1 + scale)+shift
 
 
 class SubModule(nn.Module):
