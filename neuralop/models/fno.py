@@ -1,5 +1,5 @@
 from functools import partialmethod
-from typing import Optional, Tuple, List, Union, Literal
+from typing import Tuple, List, Union, Literal
 
 Number = Union[float, int]
 
@@ -14,9 +14,9 @@ warnings.filterwarnings("once", category=UserWarning)
 
 
 from ..layers.embeddings import GridEmbeddingND, GridEmbedding2D
-from ..layers.spectral_convolution import SpectralConv
+from ..layers.spectral_convolution import SpectralConv, ConditionalSpectralConv
 from ..layers.padding import DomainPadding
-from ..layers.fno_block import FNOBlocks
+from ..layers.fno_block import FNOBlocks, ConditionalFNOBlocks
 from ..layers.channel_mlp import ChannelMLP
 from ..layers.complex import ComplexValued
 from .base_model import BaseModel
@@ -207,8 +207,8 @@ class FNO(BaseModel, name="FNO"):
         preactivation: bool = False,
         conv_module: nn.Module = SpectralConv,
         enforce_hermitian_symmetry: bool = True,
-        cond_embed_dim: Optional[int] = None,
-        mode_modulation: bool = False,
+        fno_block_module: nn.Module = FNOBlocks,
+        fno_block_kwargs: dict = None,
     ):
         if decomposition_kwargs is None:
             decomposition_kwargs = {}
@@ -289,7 +289,7 @@ class FNO(BaseModel, name="FNO"):
         self.resolution_scaling_factor = resolution_scaling_factor
 
         ## FNO blocks
-        self.fno_blocks = FNOBlocks(
+        self.fno_blocks = fno_block_module(
             in_channels=hidden_channels,
             out_channels=hidden_channels,
             n_modes=self.n_modes,
@@ -317,8 +317,7 @@ class FNO(BaseModel, name="FNO"):
             conv_module=conv_module,
             n_layers=n_layers,
             enforce_hermitian_symmetry=enforce_hermitian_symmetry,
-            cond_embed_dim=cond_embed_dim,
-            mode_modulation=mode_modulation,
+            **(fno_block_kwargs or {}),
         )
 
         ## Lifting layer
@@ -456,49 +455,55 @@ class ConditionalFNO(FNO, name="ConditionalFNO"):
 
     Parameters
     ----------
-    cond_embed_dim : int
-        Dimension of the conditioning embedding supplied to forward.
-
+    condition_embedding_channels : int
+        Width of the conditioning embedding supplied to forward.
     mode_modulation : bool, optional
-        If True, use ConditionalSpectralConv to apply per-mode spectral
-        modulation. Requires cond_embed_dim. Default: False.
-
+        Enable spectral per-mode modulation. Default: True.
+    film : bool, optional
+        Enable adaptive-normalization FiLM conditioning. Defaults True.
+    modulation_type, k_embed_dim, type_k, modulator_hidden_channels
+        Forwarded to ConditionalSpectralConv
     All other parameters are inherited from FNO.
     """
 
-    def __init__(self, *args, cond_embed_dim: int, mode_modulation: bool = False, **kwargs):
-        super().__init__(*args, cond_embed_dim=cond_embed_dim, mode_modulation=mode_modulation, **kwargs)
+    def __init__(
+        self,
+        *args,
+        condition_embedding_channels: int,
+        mode_modulation: bool = True,
+        film: bool = True,
+        modulation_type: str = "polar",
+        k_embed_dim: int = 32,
+        type_k: str = "power",
+        modulator_hidden_channels: int = 64,
+        conv_module=None,
+        **kwargs,
+    ):
+        if conv_module is None:
+            conv_module = ConditionalSpectralConv if mode_modulation else SpectralConv
+        super().__init__(
+            *args,
+            conv_module=conv_module,
+            fno_block_module=ConditionalFNOBlocks,
+            fno_block_kwargs={
+                "condition_embedding_channels": condition_embedding_channels,
+                "mode_modulation": mode_modulation,
+                "film": film,
+                "modulation_type": modulation_type,
+                "k_embed_dim": k_embed_dim,
+                "type_k": type_k,
+                "modulator_hidden_channels": modulator_hidden_channels,
+            },
+            **kwargs,
+        )
 
     def forward(self, x, output_shape=None, cond_emb=None, **kwargs):
-        if kwargs:
-            warnings.warn(
-                f"ConditionalFNO.forward() received unexpected keyword arguments: {list(kwargs.keys())}. "
-                "These arguments will be ignored.",
-                UserWarning,
-                stacklevel=2,
-            )
-
-        if output_shape is None:
-            output_shape = [None] * self.n_layers
-        elif isinstance(output_shape, tuple):
-            output_shape = [None] * (self.n_layers - 1) + [output_shape]
-
-        if self.positional_embedding is not None:
-            x = self.positional_embedding(x)
-
-        x = self.lifting(x)
-
-        if self.domain_padding is not None:
-            x = self.domain_padding.pad(x)
-
-        for layer_idx in range(self.n_layers):
-            x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx], cond_emb=cond_emb)
-
-        if self.domain_padding is not None:
-            x = self.domain_padding.unpad(x)
-
-        x = self.projection(x)
-        return x
+        """FNO forward pass with a conditioning embedding."""
+        self.fno_blocks.set_cond_emb(cond_emb)
+        try:
+            return super().forward(x, output_shape=output_shape, **kwargs)
+        finally:
+            self.fno_blocks.set_cond_emb(None)
 
 
 class TFNO(FNO):
