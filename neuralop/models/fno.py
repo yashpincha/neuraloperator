@@ -1,4 +1,4 @@
-from functools import partialmethod
+from functools import partial, partialmethod
 from typing import Tuple, List, Union, Literal
 
 Number = Union[float, int]
@@ -207,8 +207,7 @@ class FNO(BaseModel, name="FNO"):
         preactivation: bool = False,
         conv_module: nn.Module = SpectralConv,
         enforce_hermitian_symmetry: bool = True,
-        fno_block_module: nn.Module = FNOBlocks,
-        fno_block_kwargs: dict = None,
+        block_factory=FNOBlocks,
     ):
         if decomposition_kwargs is None:
             decomposition_kwargs = {}
@@ -289,7 +288,7 @@ class FNO(BaseModel, name="FNO"):
         self.resolution_scaling_factor = resolution_scaling_factor
 
         ## FNO blocks
-        self.fno_blocks = fno_block_module(
+        self.fno_blocks = block_factory(
             in_channels=hidden_channels,
             out_channels=hidden_channels,
             n_modes=self.n_modes,
@@ -317,7 +316,6 @@ class FNO(BaseModel, name="FNO"):
             conv_module=conv_module,
             n_layers=n_layers,
             enforce_hermitian_symmetry=enforce_hermitian_symmetry,
-            **(fno_block_kwargs or {}),
         )
 
         ## Lifting layer
@@ -385,6 +383,9 @@ class FNO(BaseModel, name="FNO"):
                 stacklevel=2,
             )
 
+        return self._forward_impl(x, output_shape=output_shape)
+
+    def _forward_impl(self, x, output_shape=None, condition_embedding=None):
         if output_shape is None:
             output_shape = [None] * self.n_layers
         elif isinstance(output_shape, tuple):
@@ -399,8 +400,9 @@ class FNO(BaseModel, name="FNO"):
         if self.domain_padding is not None:
             x = self.domain_padding.pad(x)
 
+        block_kwargs = {} if condition_embedding is None else {"condition_embedding": condition_embedding}
         for layer_idx in range(self.n_layers):
-            x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx])
+            x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx], **block_kwargs)
 
         if self.domain_padding is not None:
             x = self.domain_padding.unpad(x)
@@ -451,7 +453,7 @@ def partialclass(new_name, cls, *args, **kwargs):
 
 class ConditionalFNO(FNO, name="ConditionalFNO"):
     """FNO with parameter conditioning via spectral modulation and adaptive normalization FiLM.
-    Extends FNO by accepting a pre-computed conditioning embedding cond_emb in forward.
+    Extends FNO by accepting a pre-computed condition_embedding in forward.
 
     Parameters
     ----------
@@ -481,29 +483,27 @@ class ConditionalFNO(FNO, name="ConditionalFNO"):
     ):
         if conv_module is None:
             conv_module = ConditionalSpectralConv if mode_modulation else SpectralConv
+        block_factory = partial(
+            ConditionalFNOBlocks,
+            condition_embedding_channels=condition_embedding_channels,
+            mode_modulation=mode_modulation,
+            film=film,
+            modulation_type=modulation_type,
+            k_embed_dim=k_embed_dim,
+            type_k=type_k,
+            modulator_hidden_channels=modulator_hidden_channels,
+        )
         super().__init__(
             *args,
             conv_module=conv_module,
-            fno_block_module=ConditionalFNOBlocks,
-            fno_block_kwargs={
-                "condition_embedding_channels": condition_embedding_channels,
-                "mode_modulation": mode_modulation,
-                "film": film,
-                "modulation_type": modulation_type,
-                "k_embed_dim": k_embed_dim,
-                "type_k": type_k,
-                "modulator_hidden_channels": modulator_hidden_channels,
-            },
+            block_factory=block_factory,
             **kwargs,
         )
 
-    def forward(self, x, output_shape=None, cond_emb=None, **kwargs):
-        """FNO forward pass with a conditioning embedding."""
-        self.fno_blocks.set_cond_emb(cond_emb)
-        try:
-            return super().forward(x, output_shape=output_shape, **kwargs)
-        finally:
-            self.fno_blocks.set_cond_emb(None)
+    def forward(self, x, output_shape=None, *, condition_embedding):
+        return self._forward_impl(
+            x, output_shape=output_shape, condition_embedding=condition_embedding
+        )
 
 
 class TFNO(FNO):
