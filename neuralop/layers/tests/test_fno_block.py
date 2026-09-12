@@ -1,3 +1,5 @@
+import inspect
+
 import pytest
 import torch
 from ..fno_block import FNOBlocks, ConditionalFNOBlocks
@@ -237,16 +239,16 @@ def test_conditional_fno_block_forward_shape(dim, mode_modulation):
     )
     x = torch.randn(2, 4, *spatial)
     e = torch.randn(2, cond_dim)
-    y = block(x, cond_emb=e)
+    y = block(x, condition_embedding=e)
     assert y.shape == (2, 4, *spatial)
     assert torch.isfinite(y).all()
 
 
 def test_conditional_fno_block_no_cond_emb_is_identity_path():
-    """When cond_emb=None, FiLM projectors are unused; output is deterministic."""
+    """When condition_embedding=None, FiLM projectors are unused; output is deterministic."""
     block = ConditionalFNOBlocks(4, 4, (6, 6), condition_embedding_channels=8, mode_modulation=False)
     x = torch.randn(2, 4, 10, 10)
-    y1 = block(x, cond_emb=None)
+    y1 = block(x, condition_embedding=None)
     y2 = block(x)
     torch.testing.assert_close(y1, y2)
 
@@ -254,7 +256,7 @@ def test_conditional_fno_block_no_cond_emb_is_identity_path():
 def test_conditional_fno_block_base_fnoblocks_has_no_conditioning():
     block = FNOBlocks(4, 4, (6, 6))
     assert not hasattr(block, "film_proj")
-    assert not hasattr(block, "set_cond_emb")
+    assert "condition_embedding" not in inspect.signature(block.forward).parameters
 
 def test_conditional_fno_block_all_params_get_grad():
     torch.manual_seed(0)
@@ -262,7 +264,7 @@ def test_conditional_fno_block_all_params_get_grad():
     block = ConditionalFNOBlocks(3, 3, (6, 6), condition_embedding_channels=cond_dim, mode_modulation=True)
     x = torch.randn(2, 3, 10, 10, requires_grad=True)
     e = torch.randn(2, cond_dim, requires_grad=True)
-    block(x, cond_emb=e).sum().backward()
+    block(x, condition_embedding=e).sum().backward()
     assert x.grad is not None
     assert e.grad is not None
     for name, p in block.named_parameters():
