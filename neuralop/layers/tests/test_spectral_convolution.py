@@ -166,3 +166,14 @@ def test_conditional_spectral_conv_backward():
         lm = (layer(x - eps * v, condition_embedding=e) * w).sum()
     fd = (lp - lm) / (2 * eps)
     torch.testing.assert_close(analytic, fd, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("type_k", ["power", "sinusoidal"])
+@pytest.mark.parametrize("k_embed_dim", [31, 32, 33])
+def test_conditional_spectral_conv_odd_k_embed_dim(type_k, k_embed_dim):
+    """The k-embedding must give exactly k_embed_dim channels per axis for any
+    size; odd sinusoidal sizes previously mismatched the modulator MLP width."""
+    layer = ConditionalSpectralConv(3, 3, (6, 6), condition_embedding_channels=8,
+                                    type_k=type_k, k_embed_dim=k_embed_dim)
+    y = layer(torch.randn(2, 3, 10, 10), condition_embedding=torch.randn(2, 8))
+    assert y.shape == (2, 3, 10, 10)

@@ -500,7 +500,14 @@ class ConditionalFNO(FNO, name="ConditionalFNO"):
             **kwargs,
         )
 
-    def forward(self, x, output_shape=None, *, condition_embedding):
+    def forward(self, x, output_shape=None, *, condition_embedding, **kwargs):
+        if kwargs:
+            warnings.warn(
+                f"ConditionalFNO.forward() received unexpected keyword arguments: {list(kwargs.keys())}."
+                "These arguments will be ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
         return self._forward_impl(
             x, output_shape=output_shape, condition_embedding=condition_embedding
         )
