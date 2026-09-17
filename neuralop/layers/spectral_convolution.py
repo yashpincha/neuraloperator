@@ -644,7 +644,8 @@ class ConditionalSpectralConv(SpectralConv):
         if type_k == "power":
             self.register_buffer("k_powers", torch.linspace(-2.0, 0.0, k_embed_dim))
         elif type_k == "sinusoidal":
-            indices = torch.arange(0, k_embed_dim // 2, dtype=torch.float32)
+            num_freqs = (k_embed_dim + 1) // 2
+            indices = torch.arange(0, num_freqs, dtype=torch.float32)
             self.register_buffer("k_inv_freqs", 10000.0 ** (-2.0 * indices / k_embed_dim))
         else:
             raise ValueError(f"unknown type_k: {type_k!r}. expected 'power' or 'sinusoidal'.")
@@ -695,6 +696,7 @@ class ConditionalSpectralConv(SpectralConv):
                 1, 1, -1, *([1] * n_dims)
             )
             k_embed = torch.cat([torch.sin(k_scaled), torch.cos(k_scaled)], dim=2)
+            k_embed = k_embed[:, :, : self.k_embed_dim]
 
         return k_embed.reshape(1, -1, *shape)
 
