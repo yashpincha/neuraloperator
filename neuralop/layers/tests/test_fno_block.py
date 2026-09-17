@@ -269,3 +269,14 @@ def test_conditional_fno_block_all_params_get_grad():
     assert e.grad is not None
     for name, p in block.named_parameters():
         assert p.grad is not None, f"no grad for {name}"
+
+
+def test_conditional_fno_block_indexed_forward():
+    torch.manual_seed(0)
+    cond_dim = 8
+    block = ConditionalFNOBlocks(3, 3, (6, 6), condition_embedding_channels=cond_dim, mode_modulation=True, n_layers=2)
+    x = torch.randn(2, 3, 10, 10)
+    e = torch.randn(2, cond_dim)
+    y = block[0](x, condition_embedding=e)
+    assert y.shape == (2, 3, 10, 10)
+    assert torch.isfinite(y).all()
